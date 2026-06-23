@@ -1,5 +1,4 @@
 import { capitalize, includes } from "lodash";
-import { FetchError, Headers } from "node-fetch";
 import { IncomingMessage, ServerResponse } from "http";
 import { PassThrough } from "stream";
 import { Request, RequestHandler, Response } from "express";
@@ -110,12 +109,12 @@ export function proxyRequestHandler(
         err instanceof FirebaseError && err.original?.name.includes("AbortError");
       const isTimeoutError =
         err instanceof FirebaseError &&
-        err.original instanceof FetchError &&
-        err.original.code === "ETIMEDOUT";
+        ((err.original as any)?.code === "ETIMEDOUT" ||
+          (err.original as any)?.cause?.code === "ETIMEDOUT");
       const isSocketTimeoutError =
         err instanceof FirebaseError &&
-        err.original instanceof FetchError &&
-        err.original.code === "ESOCKETTIMEDOUT";
+        ((err.original as any)?.code === "ESOCKETTIMEDOUT" ||
+          (err.original as any)?.cause?.code === "ESOCKETTIMEDOUT");
       if (isAbortError || isTimeoutError || isSocketTimeoutError) {
         res.statusCode = 504;
         return res.end("Timed out waiting for function to respond.\n");
@@ -170,11 +169,18 @@ export function proxyRequestHandler(
       }
     }
 
-    for (const [key, value] of Object.entries(proxyRes.response.headers.raw())) {
-      res.setHeader(key, value as string[]);
+    for (const [key, value] of proxyRes.response.headers.entries()) {
+      if (
+        key.toLowerCase() === "set-cookie" &&
+        typeof proxyRes.response.headers.getSetCookie === "function"
+      ) {
+        res.setHeader(key, proxyRes.response.headers.getSetCookie());
+      } else {
+        res.setHeader(key, value);
+      }
     }
     res.statusCode = proxyRes.status;
-    proxyRes.response.body.pipe(res);
+    proxyRes.body.pipe(res);
   };
 }
 

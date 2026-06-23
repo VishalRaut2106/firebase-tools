@@ -1,7 +1,8 @@
 import { createServer, Server } from "http";
 import { expect } from "chai";
-import * as nock from "nock";
-import AbortController from "abort-controller";
+import * as sinon from "sinon";
+import * as auth from "./auth";
+import nock from "./test/helpers/nock";
 const proxySetup = require("proxy");
 
 import { Client, CLI_OAUTH_PROJECT_NUMBER } from "./apiv2";
@@ -9,6 +10,14 @@ import { FirebaseError } from "./error";
 import { streamToString, stringToStream } from "./utils";
 
 describe("apiv2", () => {
+  let authStub: sinon.SinonStub;
+  before(() => {
+    authStub = sinon.stub(auth, "getAccessToken").resolves({ access_token: "owner" } as any);
+  });
+  after(() => {
+    authStub.restore();
+  });
+
   beforeEach(() => {
     // The api module has package variables that we don't want sticking around.
     delete require.cache[require.resolve("./apiv2")];
@@ -510,7 +519,11 @@ describe("apiv2", () => {
           new Promise((resolve) => proxyServer.close(resolve)),
           new Promise((resolve) => targetServer.close(resolve)),
         ]);
-        process.env.HTTP_PROXY = oldProxy;
+        if (oldProxy === undefined) {
+          delete process.env.HTTP_PROXY;
+        } else {
+          process.env.HTTP_PROXY = oldProxy;
+        }
       });
 
       it("should be able to make a basic GET request", async () => {

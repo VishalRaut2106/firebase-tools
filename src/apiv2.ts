@@ -1,10 +1,7 @@
-import { AbortSignal } from "abort-controller";
 import { URL, URLSearchParams } from "url";
 import { Readable } from "stream";
-import { ProxyAgent } from "proxy-agent";
+import { ProxyAgent } from "undici";
 import * as retry from "retry";
-import AbortController from "abort-controller";
-import fetch, { HeadersInit, Response, RequestInit, Headers } from "node-fetch";
 import util from "util";
 
 import * as auth from "./auth";
@@ -36,7 +33,6 @@ const GOOG_QUOTA_USER_HEADER = "x-goog-quota-user";
 
 // Header for specifying a quota project. See https://cloud.google.com/apis/docs/system-parameters#project-header
 export const GOOG_USER_PROJECT_HEADER = "x-goog-user-project";
-const GOOGLE_CLOUD_QUOTA_PROJECT = process.env.GOOGLE_CLOUD_QUOTA_PROJECT;
 export const CLI_OAUTH_PROJECT_NUMBER = "563584335869";
 
 export type HttpMethod =
@@ -148,13 +144,16 @@ export async function getAccessToken(): Promise<string> {
 }
 
 function proxyURIFromEnv(): string | undefined {
-  return (
+  const uri =
     process.env.HTTPS_PROXY ||
     process.env.https_proxy ||
     process.env.HTTP_PROXY ||
     process.env.http_proxy ||
-    undefined
-  );
+    undefined;
+  if (uri === "undefined" || uri === "null") {
+    return undefined;
+  }
+  return uri;
 }
 
 export type ClientOptions = {
@@ -162,6 +161,11 @@ export type ClientOptions = {
   apiVersion?: string;
   auth?: boolean;
 };
+
+interface FetchOptions extends RequestInit {
+  dispatcher?: ProxyAgent;
+  duplex?: "half";
+}
 
 export class Client {
   constructor(private opts: ClientOptions) {
@@ -322,10 +326,10 @@ export class Client {
     }
     if (
       !reqOptions.ignoreQuotaProject &&
-      GOOGLE_CLOUD_QUOTA_PROJECT &&
-      GOOGLE_CLOUD_QUOTA_PROJECT !== ""
+      process.env.GOOGLE_CLOUD_QUOTA_PROJECT &&
+      process.env.GOOGLE_CLOUD_QUOTA_PROJECT !== ""
     ) {
-      reqOptions.headers.set(GOOG_USER_PROJECT_HEADER, GOOGLE_CLOUD_QUOTA_PROJECT);
+      reqOptions.headers.set(GOOG_USER_PROJECT_HEADER, process.env.GOOGLE_CLOUD_QUOTA_PROJECT);
     }
     return reqOptions;
   }
@@ -374,24 +378,19 @@ export class Client {
       }
     }
 
-    const fetchOptions: RequestInit = {
+    const fetchOptions: FetchOptions = {
       headers: options.headers,
       method: options.method,
       redirect: options.redirect,
-      compress: options.compress,
     };
 
-    if (proxyURIFromEnv()) {
-      fetchOptions.agent = new ProxyAgent();
+    const proxyURI = proxyURIFromEnv();
+    if (proxyURI) {
+      fetchOptions.dispatcher = new ProxyAgent({ uri: proxyURI });
     }
 
     if (options.signal) {
-      const signal = options.signal as any;
-      signal.reason = "";
-      signal.throwIfAborted = () => {
-        throw new FirebaseError("Aborted");
-      };
-      fetchOptions.signal = signal;
+      fetchOptions.signal = options.signal;
     }
 
     let reqTimeout: NodeJS.Timeout | undefined;
@@ -400,16 +399,14 @@ export class Client {
       reqTimeout = setTimeout(() => {
         controller.abort();
       }, options.timeout);
-      const signal = controller.signal as any;
-      signal.reason = "";
-      signal.throwIfAborted = () => {
-        throw new FirebaseError("Aborted");
-      };
-      fetchOptions.signal = signal;
+      fetchOptions.signal = controller.signal;
     }
 
     if (typeof options.body === "string" || isStream(options.body)) {
-      fetchOptions.body = options.body;
+      fetchOptions.body = options.body as any;
+      if (isStream(options.body)) {
+        fetchOptions.duplex = "half";
+      }
     } else if (options.body !== undefined) {
       fetchOptions.body = JSON.stringify(options.body);
     }
@@ -446,7 +443,12 @@ export class Client {
           try {
             res = await fetch(fetchURL, fetchOptions);
           } catch (thrown: any) {
-            const err = thrown instanceof Error ? thrown : new Error(thrown);
+            const err =
+              thrown && typeof thrown === "object" && thrown.cause instanceof Error
+                ? thrown.cause
+                : thrown instanceof Error
+                  ? thrown
+                  : new Error(thrown);
             logger.debug(
               `*** [apiv2] error from fetch(${fetchURL}, ${JSON.stringify(fetchOptions)}): ${err}`,
             );
@@ -483,7 +485,13 @@ export class Client {
           } else if (options.responseType === "xml") {
             body = (await res.text()) as unknown as ResT;
           } else if (options.responseType === "stream") {
-            body = res.body as unknown as ResT;
+            if (res.body) {
+              body = Readable.fromWeb(res.body as any) as unknown as ResT;
+            } else {
+              const emptyStream = new Readable();
+              emptyStream.push(null);
+              body = emptyStream as unknown as ResT;
+            }
           } else {
             throw new FirebaseError(`Unable to interpret response. Please set responseType.`, {
               exit: 2,

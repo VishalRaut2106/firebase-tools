@@ -2,7 +2,7 @@ import { createGunzip, createGzip } from "zlib";
 import { expect } from "chai";
 import * as express from "express";
 import * as http from "http";
-import * as nock from "nock";
+import nock from "../test/helpers/nock";
 import * as portfinder from "portfinder";
 import * as supertest from "supertest";
 
